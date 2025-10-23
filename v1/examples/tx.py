@@ -4,9 +4,10 @@ import board
 
 # Define pin assignments for CircuitPython
 # These are example pins - adjust according to your specific board layout
-CLK_PIN = board.P1_11      # SPI clock
-MOSI_PIN = board.P1_15    # SPI MOSI 
-MISO_PIN = board.P0_02    # SPI MISO
+# For nRF52-based boards, use P pins. For other boards, try board.SCK, board.MOSI, board.MISO
+CLK_PIN = board.P1_11      # SPI clock (or board.SCK)
+MOSI_PIN = board.P1_15    # SPI MOSI (or board.MOSI)
+MISO_PIN = board.P0_02    # SPI MISO (or board.MISO)
 CS_PIN = board.P1_13        # Chip select
 IRQ_PIN = board.P0_10       # Interrupt/DIO1
 RST_PIN = board.P0_09       # Reset
