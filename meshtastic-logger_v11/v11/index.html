@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Meshtastic Contact Visualizer</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="/static/leaflet/leaflet.css" />
+  <style>
+    body { margin:0; padding:0; }
+    #map { width:100vw; height:100vh; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script src="/static/leaflet/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([42.37, -71.20], 10);
+    L.tileLayer('/tiles/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors (Local Cache)',
+      maxZoom: 12,
+      minZoom: 6,
+      bounds: [[41.237, -73.508], [45.307, -69.858]] // MA, NH, VT bounds
+    }).addTo(map);
+
+    const ownPath = [];
+    const ownPolyline = L.polyline(ownPath, {color:'blue'}).addTo(map);
+    const contactsLayer = L.featureGroup().addTo(map);
+    const seenContacts = new Set();
+    const unknownNodes = []; // Track unknown nodes for even spacing
+
+    function createKnownIcon(label, snr) {
+      const color = getColorFromSnr(snr);
+      return L.divIcon({
+        html: `<div style="width:40px;height:40px;border-radius:50%;background:white;border:3px solid ${color};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;color:#333;text-align:center;line-height:1;word-break:break-all;">${label}</div>`,
+        className: '',
+        iconSize: [40, 40],
+        iconAnchor: [20, 20]
+      });
+    }
+    function createUnknownIcon(label, snr) {
+      const color = getColorFromSnr(snr);
+      return L.divIcon({
+        html: `<div style="width:40px;height:40px;border-radius:50%;background:white;border:3px dashed ${color};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;color:#333;text-align:center;line-height:1;word-break:break-all;">${label}</div>`,
+        className: '',
+        iconSize: [40, 40],
+        iconAnchor: [20, 20]
+      });
+    }
+    function createSelfIcon(label) {
+      return L.divIcon({
+        html: `<div style="width:40px;height:40px;border-radius:50%;background:white;border:4px solid #0088ff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;color:#0088ff;text-align:center;line-height:1;">${label}</div>`,
+        className: '',
+        iconSize: [40, 40],
+        iconAnchor: [20, 20]
+      });
+    }
+
+    function formatAgo(timestamp) {
+      const now = new Date();
+      const then = new Date(timestamp);
+      const seconds = Math.round((now - then) / 1000);
+      return seconds < 60 ? `${seconds}s ago` : `${Math.round(seconds / 60)}m ago`;
+    }
+
+    function getColorFromSnr(snr) {
+      const snrVal = parseFloat(snr);
+      if (isNaN(snrVal)) return 'gray';
+      if (snrVal >= 10) return 'green';
+      if (snrVal >= 0) return 'orange';
+      return 'red';
+    }
+
+    async function parseAndPlot() {
+      try {
+        const res = await fetch('latest.csv?' + Date.now());
+        const text = await res.text();
+        const lines = text.trim().split('\n');
+        if (lines.length === 0) return;
+        const header = lines.shift().split(',');
+
+        const idx = {};
+        header.forEach((h, i) => idx[h.trim()] = i);
+
+        // Limit to most recent 20 nodes
+        const recentLines = lines.slice(-20);
+        
+        recentLines.forEach(row => {
+          const cols = row.split(',');
+          const timestamp = cols[idx['timestamp']] || '';
+          const ourLat = parseFloat(cols[idx['our_latitude']]);
+          const ourLon = parseFloat(cols[idx['our_longitude']]);
+          const nodeLat = parseFloat(cols[idx['node_latitude']]);
+          const nodeLon = parseFloat(cols[idx['node_longitude']]);
+          const nodeId = cols[idx['node_id']] || '';
+          const nodeName = cols[idx['short_name']] || cols[idx['long_name']] || 'Unknown';
+          const snr = cols[idx['snr']] || '';
+
+          if (!timestamp || !nodeId) return;
+
+          if (seenContacts.has(nodeId)) return;
+          seenContacts.add(nodeId);
+
+          const ago = formatAgo(timestamp);
+          const shortName = (nodeName && nodeName.length > 12) ? nodeName.slice(0, 12) + '…' : nodeName;
+          const color = getColorFromSnr(snr);
+
+          let fromLatLng;
+          if (!isNaN(ourLat) && !isNaN(ourLon)) {
+            fromLatLng = [ourLat, ourLon];
+            ownPath.push(fromLatLng);
+            ownPolyline.setLatLngs(ownPath);
+            L.marker(fromLatLng, {icon: createSelfIcon('You')})
+              .addTo(contactsLayer);
+          }
+
+          if (!isNaN(nodeLat) && !isNaN(nodeLon)) {
+            const toLatLng = [nodeLat, nodeLon];
+            L.marker(toLatLng, {icon: createKnownIcon(shortName, snr)})
+              .addTo(contactsLayer);
+            if (fromLatLng) {
+              L.polyline([fromLatLng, toLatLng], {color: color}).addTo(contactsLayer);
+            }
+          } else {
+            // Node without location - store for later positioning
+            if (fromLatLng) {
+              unknownNodes.push({
+                nodeId: nodeId,
+                shortName: shortName,
+                snr: snr,
+                color: color,
+                fromLatLng: fromLatLng,
+                ourLat: fromLatLng[0]
+              });
+            } else {
+              // No position data for us or the node - just log it
+              console.log(`Node ${shortName} has no position and our position unknown`);
+            }
+          }
+        });
+
+        // Position unknown nodes evenly in horizontal space
+        if (unknownNodes.length > 0) {
+          const mapBounds = map.getBounds();
+          const mapWidth = mapBounds.getEast() - mapBounds.getWest();
+          
+          // Group unknown nodes by latitude (our position when they were seen)
+          const nodesByLat = {};
+          unknownNodes.forEach(node => {
+            const latKey = Math.round(node.ourLat * 10000) / 10000; // Round to avoid floating point issues
+            if (!nodesByLat[latKey]) {
+              nodesByLat[latKey] = [];
+            }
+            nodesByLat[latKey].push(node);
+          });
+          
+          // Position nodes for each latitude group
+          Object.keys(nodesByLat).forEach(latKey => {
+            const nodesAtLat = nodesByLat[latKey];
+            const lat = parseFloat(latKey);
+            
+            // Calculate even horizontal spacing
+            const startLon = mapBounds.getWest() - mapWidth * 0.15; // Start further left
+            const spacing = mapWidth * 0.05; // Space between nodes
+            
+            nodesAtLat.forEach((node, index) => {
+              const lon = startLon - (index * spacing);
+              const unknownNodePos = [lat, lon];
+              
+              L.marker(unknownNodePos, {icon: createUnknownIcon(node.shortName, node.snr)})
+                .addTo(contactsLayer);
+              
+              // Draw dotted line from our position to the unknown node
+              L.polyline([node.fromLatLng, unknownNodePos], {
+                color: node.color, 
+                dashArray: '5,5',
+                weight: 2,
+                opacity: 0.7
+              }).addTo(contactsLayer);
+            });
+          });
+        }
+
+        const bounds = ownPolyline.getBounds().extend(contactsLayer.getBounds());
+        if (bounds.isValid()) map.fitBounds(bounds, {maxZoom: 16});
+      } catch (error) {
+        console.error('Error parsing log:', error);
+      }
+    }
+
+    parseAndPlot();
+    setInterval(parseAndPlot, 60 * 1000);
+  </script>
+</body>
+</html>
